@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
     View,
@@ -6,23 +6,65 @@ import {
     Pressable,
     StyleSheet,
     SafeAreaView,
+    ActivityIndicator,
 } from 'react-native';
+import { Session } from '@supabase/supabase-js';
+import { supabase } from './src/supabase/client';
 import { DashboardScreen } from './src/screens/Dashboard';
 import { OrcamentosScreen } from './src/screens/Orcamentos';
 import { InsumosScreen } from './src/screens/Insumos';
 import { ServicosScreen } from './src/screens/Servicos';
+import { ConfiguracoesScreen } from './src/screens/Configuracoes';
+import { LoginScreen } from './src/screens/Login';
 
-type Tab = 'dashboard' | 'orcamentos' | 'insumos' | 'servicos';
+type Tab = 'dashboard' | 'orcamentos' | 'insumos' | 'servicos' | 'config';
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
     { key: 'dashboard', label: 'Início', icon: '📊' },
     { key: 'orcamentos', label: 'Orçamentos', icon: '📋' },
     { key: 'servicos', label: 'Serviços', icon: '🔧' },
     { key: 'insumos', label: 'Insumos', icon: '📦' },
+    { key: 'config', label: 'Config', icon: '⚙️' },
 ];
 
 export default function App() {
     const [tabAtiva, setTabAtiva] = useState<Tab>('dashboard');
+    const [session, setSession] = useState<Session | null>(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        // Obter sessão inicial
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            setSession(session);
+            setLoading(false);
+        });
+
+        // Ouvir mudanças no estado de autenticação
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+            setSession(session);
+            setLoading(false);
+        });
+
+        return () => subscription.unsubscribe();
+    }, []);
+
+    if (loading) {
+        return (
+            <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color="#fff" />
+                <Text style={styles.loadingText}>Carregando sessão...</Text>
+            </View>
+        );
+    }
+
+    if (!session) {
+        return (
+            <>
+                <StatusBar style="light" />
+                <LoginScreen />
+            </>
+        );
+    }
 
     function renderTela() {
         switch (tabAtiva) {
@@ -30,6 +72,7 @@ export default function App() {
             case 'orcamentos':  return <OrcamentosScreen />;
             case 'servicos':    return <ServicosScreen />;
             case 'insumos':     return <InsumosScreen />;
+            case 'config':      return <ConfiguracoesScreen />;
         }
     }
 
@@ -75,6 +118,18 @@ const styles = StyleSheet.create({
         flex: 1,
         backgroundColor: '#f0f2f8',
     },
+    loadingContainer: {
+        flex: 1,
+        backgroundColor: '#0f3460',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    loadingText: {
+        marginTop: 12,
+        color: '#fff',
+        fontSize: 15,
+        fontWeight: '500',
+    },
     tabBar: {
         flexDirection: 'row',
         backgroundColor: '#fff',
@@ -94,7 +149,7 @@ const styles = StyleSheet.create({
         paddingVertical: 4,
     },
     tabIcon: {
-        fontSize: 22,
+        fontSize: 20,
         marginBottom: 2,
         opacity: 0.4,
     },
@@ -102,7 +157,7 @@ const styles = StyleSheet.create({
         opacity: 1,
     },
     tabLabel: {
-        fontSize: 10,
+        fontSize: 9,
         color: '#aaa',
         fontWeight: '500',
     },
