@@ -1,108 +1,179 @@
-import { getDatabase } from '../database/db';
+import { supabase } from '../supabase/client';
 import { Orcamento, OrcamentoCreate } from '../models';
 
 export class OrcamentoRepository {
     // ─── Consultas ────────────────────────────────────────────────────────────
 
     async findAll(): Promise<Orcamento[]> {
-        const db = await getDatabase();
-        const rows = await db.getAllAsync<any>(
-            `SELECT o.*, c.nome AS cliente_nome
-             FROM orcamentos o
-             LEFT JOIN clientes c ON c.id = o.cliente_id
-             ORDER BY o.created_at DESC`
-        );
-        return rows.map(this.mapRow);
+        const { data, error } = await supabase
+            .from('orcamentos')
+            .select(`
+                *,
+                clientes (
+                    nome
+                )
+            `)
+            .order('created_at', { ascending: false });
+
+        if (error) {
+            console.error('Erro ao buscar orçamentos:', error);
+            throw new Error(error.message);
+        }
+
+        return (data || []).map(this.mapRow);
     }
 
     async findById(id: number): Promise<Orcamento | null> {
-        const db = await getDatabase();
-        const row = await db.getFirstAsync<any>(
-            `SELECT o.*, c.nome AS cliente_nome
-             FROM orcamentos o
-             LEFT JOIN clientes c ON c.id = o.cliente_id
-             WHERE o.id = ?`,
-            [id]
-        );
-        if (!row) return null;
+        const { data, error } = await supabase
+            .from('orcamentos')
+            .select(`
+                *,
+                clientes (
+                    nome
+                ),
+                orcamento_servicos (
+                    *
+                )
+            `)
+            .eq('id', id)
+            .maybeSingle();
 
-        const servicos = await db.getAllAsync<any>(
-            `SELECT * FROM orcamento_servicos WHERE orcamento_id = ?`,
-            [id]
-        );
+        if (error) {
+            console.error('Erro ao buscar orçamento por ID:', error);
+            throw new Error(error.message);
+        }
 
-        return {
-            ...this.mapRow(row),
-            servicos: servicos.map(this.mapServicoRow),
-        };
+        if (!data) return null;
+
+        const orcamento = this.mapRow(data);
+        orcamento.servicos = (data.orcamento_servicos || []).map(this.mapServicoRow);
+        return orcamento;
     }
 
     async findByMonth(date: Date): Promise<Orcamento[]> {
-        const db = await getDatabase();
         const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const prefix = `${year}-${month}`;
+        const month = date.getMonth(); // 0-indexed
+        const startDate = new Date(year, month, 1).toISOString();
+        const endDate = new Date(year, month + 1, 1).toISOString();
 
-        const rows = await db.getAllAsync<any>(
-            `SELECT o.*, c.nome AS cliente_nome
-             FROM orcamentos o
-             LEFT JOIN clientes c ON c.id = o.cliente_id
-             WHERE strftime('%Y-%m', o.created_at) = ?
-             ORDER BY o.created_at DESC`,
-            [prefix]
-        );
+        const { data, error } = await supabase
+            .from('orcamentos')
+            .select(`
+                *,
+                clientes (
+                    nome
+                ),
+                orcamento_servicos (
+                    *
+                )
+            `)
+            .gte('created_at', startDate)
+            .lt('created_at', endDate)
+            .order('created_at', { ascending: false });
 
-        const orcamentos = await Promise.all(rows.map(async (row) => {
-            const servicos = await db.getAllAsync<any>(
-                `SELECT * FROM orcamento_servicos WHERE orcamento_id = ?`,
-                [row.id]
-            );
-            return { ...this.mapRow(row), servicos: servicos.map(this.mapServicoRow) };
-        }));
+        if (error) {
+            console.error('Erro ao buscar orçamentos do mês:', error);
+            throw new Error(error.message);
+        }
 
-        return orcamentos;
+        return (data || []).map((row) => {
+            const orcamento = this.mapRow(row);
+            orcamento.servicos = (row.orcamento_servicos || []).map(this.mapServicoRow);
+            return orcamento;
+        });
     }
 
     // ─── Mutações ─────────────────────────────────────────────────────────────
 
     async create(data: OrcamentoCreate): Promise<number> {
-        const db = await getDatabase();
-        const result = await db.runAsync(
-            `INSERT INTO orcamentos
-               (cliente_id, numero, status, validade_dias, observacoes, desconto_centavos)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-                data.clienteId ?? null,
-                data.numero,
-                data.status,
-                data.validadeDias,
-                data.observacoes ?? null,
-                data.descontoCentavos,
-            ]
-        );
-        return result.lastInsertRowId;
+        const { data: inserted, error } = await supabase
+            .from('orcamentos')
+            .insert({
+                cliente_id: data.clienteId || null,
+                numero: data.numero,
+                status: data.status,
+                validade_dias: data.validadeDias,
+                observacoes: data.observacoes || null,
+                desconto_centavos: data.descontoCentavos,
+            })
+            .select('id')
+            .single();
+
+        if (error) {
+            console.error('Erro ao criar orçamento:', error);
+            throw new Error(error.message);
+        }
+
+        return Number(inserted.id);
+    }
+
+    /** Cria o orçamento com todos os seus serviços (snapshot de preços) */
+    async createComServicos(
+        data: OrcamentoCreate,
+        servicos: Array<{
+            servicoId: number;
+            descricaoSnapshot: string;
+            quantidade: number;
+            precoVendaUnitarioCentavos: number;
+            custoTotalCentavos: number;
+        }>
+    ): Promise<number> {
+        const orcamentoId = await this.create(data);
+
+        if (servicos.length > 0) {
+            const rowsToInsert = servicos.map((s) => ({
+                orcamento_id: orcamentoId,
+                servico_id: s.servicoId,
+                quantidade: s.quantidade,
+                preco_venda_unitario_centavos: s.precoVendaUnitarioCentavos,
+                custo_total_centavos: s.custoTotalCentavos,
+                descricao_snapshot: s.descricaoSnapshot,
+            }));
+
+            const { error: insertError } = await supabase
+                .from('orcamento_servicos')
+                .insert(rowsToInsert);
+
+            if (insertError) {
+                console.error('Erro ao vincular serviços ao orçamento:', insertError);
+                throw new Error(insertError.message);
+            }
+        }
+
+        return orcamentoId;
     }
 
     async updateStatus(id: number, status: Orcamento['status']): Promise<void> {
-        const db = await getDatabase();
-        await db.runAsync(
-            `UPDATE orcamentos SET status = ?, updated_at = datetime('now') WHERE id = ?`,
-            [status, id]
-        );
+        const { error } = await supabase
+            .from('orcamentos')
+            .update({ status, updated_at: new Date().toISOString() })
+            .eq('id', id);
+
+        if (error) {
+            console.error('Erro ao atualizar status do orçamento:', error);
+            throw new Error(error.message);
+        }
     }
 
     async delete(id: number): Promise<void> {
-        const db = await getDatabase();
-        await db.runAsync(`DELETE FROM orcamentos WHERE id = ?`, [id]);
+        const { error } = await supabase
+            .from('orcamentos')
+            .delete()
+            .eq('id', id);
+
+        if (error) {
+            console.error('Erro ao excluir orçamento:', error);
+            throw new Error(error.message);
+        }
     }
 
     // ─── Mappers ──────────────────────────────────────────────────────────────
 
-    private mapRow(row: any): Orcamento {
+    private mapRow = (row: any): Orcamento => {
         return {
-            id: row.id,
-            clienteId: row.cliente_id ?? undefined,
-            clienteNome: row.cliente_nome ?? undefined,
+            id: Number(row.id),
+            clienteId: row.cliente_id ? Number(row.cliente_id) : undefined,
+            clienteNome: row.clientes?.nome ?? undefined,
             numero: row.numero,
             status: row.status,
             validadeDias: row.validade_dias,
@@ -112,13 +183,13 @@ export class OrcamentoRepository {
             createdAt: row.created_at,
             updatedAt: row.updated_at,
         };
-    }
+    };
 
-    private mapServicoRow(row: any) {
+    private mapServicoRow = (row: any) => {
         return {
-            id: row.id,
-            orcamentoId: row.orcamento_id,
-            servicoId: row.servico_id,
+            id: Number(row.id),
+            orcamentoId: Number(row.orcamento_id),
+            servicoId: Number(row.servico_id),
             descricaoSnapshot: row.descricao_snapshot,
             quantidade: row.quantidade,
             precoVendaUnitarioCentavos: row.preco_venda_unitario_centavos,
@@ -130,5 +201,5 @@ export class OrcamentoRepository {
                 return row.custo_total_centavos * row.quantidade;
             },
         };
-    }
+    };
 }

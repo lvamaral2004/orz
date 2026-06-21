@@ -1,84 +1,106 @@
-import { getDatabase } from '../database/db';
+import { supabase } from '../supabase/client';
 import { Insumo, InsumoCreate } from '../models';
 
 export class InsumoRepository {
     async findAll(apenasAtivos = true): Promise<Insumo[]> {
-        const db = await getDatabase();
-        const rows = await db.getAllAsync<any>(
-            `SELECT * FROM insumos ${apenasAtivos ? 'WHERE ativo = 1' : ''}
-             ORDER BY nome ASC`
-        );
-        return rows.map(this.mapRow);
+        let query = supabase
+            .from('insumos')
+            .select('*');
+
+        if (apenasAtivos) {
+            query = query.eq('ativo', true);
+        }
+
+        const { data, error } = await query.order('nome', { ascending: true });
+
+        if (error) {
+            console.error('Erro ao buscar insumos:', error);
+            throw new Error(error.message);
+        }
+
+        return (data || []).map(this.mapRow);
     }
 
     async findById(id: number): Promise<Insumo | null> {
-        const db = await getDatabase();
-        const row = await db.getFirstAsync<any>(
-            `SELECT * FROM insumos WHERE id = ?`,
-            [id]
-        );
-        return row ? this.mapRow(row) : null;
+        const { data, error } = await supabase
+            .from('insumos')
+            .select('*')
+            .eq('id', id)
+            .maybeSingle();
+
+        if (error) {
+            console.error('Erro ao buscar insumo por ID:', error);
+            throw new Error(error.message);
+        }
+
+        return data ? this.mapRow(data) : null;
     }
 
     async create(data: InsumoCreate): Promise<number> {
-        const db = await getDatabase();
-        const result = await db.runAsync(
-            `INSERT INTO insumos (nome, descricao, unidade, preco_custo_centavos, categoria, ativo)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-                data.nome,
-                data.descricao ?? null,
-                data.unidade,
-                data.precoCustoCentavos,
-                data.categoria ?? null,
-                data.ativo ? 1 : 0,
-            ]
-        );
-        return result.lastInsertRowId;
+        const { data: inserted, error } = await supabase
+            .from('insumos')
+            .insert({
+                nome: data.nome,
+                descricao: data.descricao || null,
+                unidade: data.unidade,
+                preco_custo_centavos: data.precoCustoCentavos,
+                categoria: data.categoria || null,
+                ativo: data.ativo ?? true,
+            })
+            .select('id')
+            .single();
+
+        if (error) {
+            console.error('Erro ao criar insumo:', error);
+            throw new Error(error.message);
+        }
+
+        return Number(inserted.id);
     }
 
     async update(id: number, data: Partial<InsumoCreate>): Promise<void> {
-        const db = await getDatabase();
-        await db.runAsync(
-            `UPDATE insumos SET
-               nome = COALESCE(?, nome),
-               descricao = COALESCE(?, descricao),
-               unidade = COALESCE(?, unidade),
-               preco_custo_centavos = COALESCE(?, preco_custo_centavos),
-               categoria = COALESCE(?, categoria),
-               ativo = COALESCE(?, ativo),
-               updated_at = datetime('now')
-             WHERE id = ?`,
-            [
-                data.nome ?? null,
-                data.descricao ?? null,
-                data.unidade ?? null,
-                data.precoCustoCentavos ?? null,
-                data.categoria ?? null,
-                data.ativo !== undefined ? (data.ativo ? 1 : 0) : null,
-                id,
-            ]
-        );
+        const updateData: any = {};
+        if (data.nome !== undefined) updateData.nome = data.nome;
+        if (data.descricao !== undefined) updateData.descricao = data.descricao || null;
+        if (data.unidade !== undefined) updateData.unidade = data.unidade;
+        if (data.precoCustoCentavos !== undefined) updateData.preco_custo_centavos = data.precoCustoCentavos;
+        if (data.categoria !== undefined) updateData.categoria = data.categoria || null;
+        if (data.ativo !== undefined) updateData.ativo = data.ativo;
+        updateData.updated_at = new Date().toISOString();
+
+        const { error } = await supabase
+            .from('insumos')
+            .update(updateData)
+            .eq('id', id);
+
+        if (error) {
+            console.error('Erro ao atualizar insumo:', error);
+            throw new Error(error.message);
+        }
     }
 
     async delete(id: number): Promise<void> {
-        const db = await getDatabase();
         // Soft delete — preserva histórico em orçamentos
-        await db.runAsync(
-            `UPDATE insumos SET ativo = 0, updated_at = datetime('now') WHERE id = ?`,
-            [id]
-        );
+        const { error } = await supabase
+            .from('insumos')
+            .update({ ativo: false, updated_at: new Date().toISOString() })
+            .eq('id', id);
+
+        if (error) {
+            console.error('Erro ao desativar insumo:', error);
+            throw new Error(error.message);
+        }
     }
 
     private mapRow(row: any): Insumo {
         return {
-            id: row.id,
+            id: Number(row.id),
             nome: row.nome,
             descricao: row.descricao ?? undefined,
             unidade: row.unidade,
             precoCustoCentavos: row.preco_custo_centavos,
             categoria: row.categoria ?? undefined,
-            ativo: row.ativo === 1,
+            ativo: row.ativo === true,
             createdAt: row.created_at,
             updatedAt: row.updated_at,
         };
